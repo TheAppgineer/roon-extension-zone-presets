@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use rust_roon_api::{RoonApi, CoreEvent, Info, Parsed, RespProps, Services, Svc, send_complete, send_continue_all, info};
 use rust_roon_api::status::{self, Status};
-use rust_roon_api::settings::{self, Settings, Widget, Dropdown, Group, Label, Layout, Textbox};
+use rust_roon_api::settings::{self, Settings, Widget, Dropdown, Group, Label, Layout, Textbox, Integer};
 use rust_roon_api::transport::{Transport, Output, Zone};
 
 #[derive(Clone, Debug, Default, Deserialize_repr, Serialize_repr)]
@@ -22,8 +22,9 @@ enum Action {
 #[repr(usize)]
 #[serde(rename_all = "snake_case")]
 enum VolumeType {
-    Current = 1,
-    #[default] Preset = 2
+    #[default] Untouched = 0,
+    LastUsed = 1,
+    Preset = 2
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -40,10 +41,11 @@ struct GroupingSettings {
     action: Action,
     add: Option<String>,
     primary_output_id: Option<String>,
+    volume_output_id: Option<String>,
+    volume_level: String,
     name: String,
     output_ids: Vec<String>,
     volume_type: VolumeType,
-    volumes: HashMap<String, i32>,
     presets: Vec<Preset>,
     extracted_preset: Option<Preset>
 }
@@ -88,7 +90,35 @@ fn store_preset(settings: &mut GroupingSettings) -> Option<()> {
     }
 }
 
-fn load_preset(settings: &mut GroupingSettings) {
+fn store_volume(settings: &mut GroupingSettings, outputs: &HashMap<String, Output>) -> Option<()> {
+    let selected = settings.selected?;
+
+    if selected < settings.presets.len() {
+        let preset = settings.presets.get_mut(selected)?;
+
+        preset.volume_type = settings.volume_type.to_owned();
+
+        if let VolumeType::Preset = settings.volume_type {
+            let volume_output_id = settings.volume_output_id.as_ref()?;
+
+            if let None = preset.volumes.get(volume_output_id) {
+                let volume = &outputs.get(volume_output_id)?.volume;
+
+                settings.volume_level = volume.value.to_string();
+            }
+
+            if let Ok(volume_level) = settings.volume_level.parse::<i32>() {
+                preset.volumes.insert(volume_output_id.to_owned(), volume_level);
+
+                return Some(())
+            }
+        }
+    }
+
+    None
+}
+
+fn load_preset(settings: &mut GroupingSettings, outputs: &HashMap<String, Output>) {
     if let Some(selected) = settings.selected {
         if let Some(preset) = settings.extracted_preset.as_ref() {
             settings.name = preset.name.to_owned();
@@ -97,10 +127,23 @@ fn load_preset(settings: &mut GroupingSettings) {
             settings.action = Action::Edit;
             settings.add = settings.output_ids.get(0).cloned();
         } else {
-            if let Some(preset) = settings.presets.get(selected) {
+            if let Some(preset) = settings.presets.get_mut(selected) {
                 settings.name = preset.name.to_owned();
                 settings.primary_output_id = Some(preset.output_ids[0].to_owned());
                 settings.output_ids = preset.output_ids.to_owned();
+
+                if let Some(volume_output_id) = &settings.volume_output_id {
+                    if let Some(volume_level) = preset.volumes.get(volume_output_id).cloned() {
+                        settings.volume_level = volume_level.to_string();
+                    } else {
+                        if let Some(output) = outputs.get(volume_output_id) {
+                            let volume_level = output.volume.value as i32;
+
+                            preset.volumes.insert(volume_output_id.to_owned(), volume_level);
+                            settings.volume_level = volume_level.to_string();
+                        }
+                    }
+                }
             } else {
                 settings.name = String::new();
                 settings.primary_output_id = None;
@@ -251,6 +294,61 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                                     values,
                                     setting: "add"
                                 }));
+
+                                let values = vec![
+                                    HashMap::from([ ("title", "(select volume control)".into()), ("value", Value::Null) ]),
+                                    HashMap::from([ ("title", "Untouched".into()), ("value", (VolumeType::Untouched as usize).into()) ]),
+                                    HashMap::from([ ("title", "Last Used".into()), ("value", (VolumeType::LastUsed as usize).into()) ]),
+                                    HashMap::from([ ("title", "Preset".into()), ("value", (VolumeType::Preset as usize).into()) ])
+                                ];
+
+                                edit_group.items.push(Widget::Dropdown(Dropdown {
+                                    title: "Volume Control",
+                                    subtitle: None,
+                                    values,
+                                    setting: "volume_type"
+                                }));
+
+                                if let VolumeType::Preset = settings.volume_type {
+                                    let mut values = vec![
+                                        HashMap::from([ ("title", "(select output)".into()), ("value", Value::Null) ])
+                                    ];
+
+                                    for output_id in &settings.output_ids {
+                                        let name = outputs.get(output_id).unwrap().display_name.to_owned();
+
+                                        values.push(HashMap::from([ ("title", name.into()), ("value", output_id.to_owned().into()) ]));
+                                    }
+
+                                    edit_group.items.push(Widget::Dropdown(Dropdown {
+                                        title: "Output",
+                                        subtitle: None,
+                                        values,
+                                        setting: "volume_output_id"
+                                    }));
+
+                                    if let Some(output_id) = &settings.volume_output_id {
+                                        let volume = &outputs.get(output_id).unwrap().volume;
+                                        let mut volume_level = Integer {
+                                            title: "Volume Level",
+                                            subtitle: None,
+                                            min: volume.min.to_string(),
+                                            max: volume.max.to_string(),
+                                            setting: "volume_level",
+                                            error: None
+                                        };
+
+                                        if let Ok(out_of_range) = volume_level.out_of_range(&settings.volume_level) {
+                                            if out_of_range {
+                                                let err_msg = format!("Volume level should be between {} and {}", volume_level.min, volume_level.max);
+
+                                                volume_level.error = Some(err_msg);
+                                            }
+                                        }
+
+                                        edit_group.items.push(Widget::Integer(volume_level));
+                                    }
+                                }
                             }
                         }
                     }
@@ -295,21 +393,21 @@ async fn main() {
     let mut roon = RoonApi::new(info!("com.theappgineer", "Zone Presets"));
     let mut provided: HashMap<String, Svc> = HashMap::new();
     let output_list = Arc::new(Mutex::new(HashMap::new()));
-    let last_selected = Arc::new(Mutex::new(None));
+    let last_selected = Arc::new(Mutex::new((None, None)));
     let settings = serde_json::from_value::<GroupingSettings>(RoonApi::load_config("settings")).unwrap_or_default();
-    let grouping_settings = Arc::new(Mutex::new(settings));
+    let saved_settings = Arc::new(Mutex::new(settings));
 
     let output_list_clone = output_list.clone();
     let last_selected_clone = last_selected.clone();
-    let grouping_settings_clone = grouping_settings.clone();
+    let saved_settings_clone = saved_settings.clone();
     let get_settings_cb = move |cb: fn(Layout<GroupingSettings>) -> Vec<RespProps>| -> Vec<RespProps> {
         let output_list = output_list_clone.lock().unwrap();
         let mut last_selected = last_selected_clone.lock().unwrap();
-        let settings = grouping_settings_clone.lock().unwrap();
+        let saved_settings = saved_settings_clone.lock().unwrap();
 
-        *last_selected = settings.selected;
+        *last_selected = (saved_settings.selected, saved_settings.volume_output_id.to_owned());
 
-        cb(make_layout(settings.to_owned(), &output_list))
+        cb(make_layout(saved_settings.to_owned(), &output_list))
     };
 
     let output_list_clone = output_list.clone();
@@ -327,12 +425,15 @@ async fn main() {
             }
         }
 
-        if settings.selected != *last_selected {
-            load_preset(&mut settings);
+        let selected_pair = (settings.selected, settings.volume_output_id.to_owned());
 
-            *last_selected = settings.selected;
+        if selected_pair != *last_selected {
+            load_preset(&mut settings, &output_list);
+
+            *last_selected = selected_pair;
         } else {
             store_preset(&mut settings);
+            store_volume(&mut settings, &output_list);
         }
 
         let layout = make_layout(settings, &output_list);
@@ -395,7 +496,7 @@ async fn main() {
                     match parsed {
                         Parsed::Zones(zones) => {
                             if matched_zone_id.is_none() {
-                                let mut presets = grouping_settings.lock().unwrap().presets.to_owned();
+                                let mut presets = saved_settings.lock().unwrap().presets.to_owned();
 
                                 if let Some((matching_preset, zone)) = match_preset(&mut presets, &zones) {
                                     let status_msg = format!(
@@ -412,7 +513,7 @@ async fn main() {
                                 }
                             }
 
-                            let mut settings = grouping_settings.lock().unwrap();
+                            let mut settings = saved_settings.lock().unwrap();
 
                             settings.extracted_preset = extract_preset(&zones);
                         }
@@ -478,14 +579,14 @@ async fn main() {
                                     status.set_status(status_msg, false).await;
                                 }
 
-                                let mut grouping_settings = grouping_settings.lock().unwrap();
+                                let mut saved_settings = saved_settings.lock().unwrap();
 
-                                if *grouping_settings.name != settings.name {
+                                if *saved_settings.name != settings.name {
                                     // A name change requires new matching
                                     matched_zone_id = None;
                                 }
 
-                                *grouping_settings = settings;
+                                *saved_settings = settings;
                             }
                         }
                         _ => ()
