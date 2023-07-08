@@ -120,37 +120,35 @@ fn store_volume(settings: &mut GroupingSettings, outputs: &HashMap<String, Outpu
 
 fn load_preset(settings: &mut GroupingSettings, outputs: &HashMap<String, Output>) {
     if let Some(selected) = settings.selected {
-        if let Some(preset) = settings.extracted_preset.as_ref() {
+        if let Some(preset) = settings.presets.get_mut(selected) {
+            settings.name = preset.name.to_owned();
+            settings.primary_output_id = Some(preset.output_ids[0].to_owned());
+            settings.output_ids = preset.output_ids.to_owned();
+            settings.add = None;
+
+            if let Some(volume_output_id) = &settings.volume_output_id {
+                if let Some(volume_level) = preset.volumes.get(volume_output_id).cloned() {
+                    settings.volume_level = volume_level.to_string();
+                } else {
+                    if let Some(output) = outputs.get(volume_output_id) {
+                        let volume_level = output.volume.value as i32;
+
+                        preset.volumes.insert(volume_output_id.to_owned(), volume_level);
+                        settings.volume_level = volume_level.to_string();
+                    }
+                }
+            }
+        } else if let Some(preset) = settings.extracted_preset.as_ref() {
             settings.name = preset.name.to_owned();
             settings.primary_output_id = Some(preset.output_ids[0].to_owned());
             settings.output_ids = preset.output_ids.to_owned();
             settings.action = Action::Edit;
             settings.add = settings.output_ids.get(0).cloned();
         } else {
-            if let Some(preset) = settings.presets.get_mut(selected) {
-                settings.name = preset.name.to_owned();
-                settings.primary_output_id = Some(preset.output_ids[0].to_owned());
-                settings.output_ids = preset.output_ids.to_owned();
-
-                if let Some(volume_output_id) = &settings.volume_output_id {
-                    if let Some(volume_level) = preset.volumes.get(volume_output_id).cloned() {
-                        settings.volume_level = volume_level.to_string();
-                    } else {
-                        if let Some(output) = outputs.get(volume_output_id) {
-                            let volume_level = output.volume.value as i32;
-
-                            preset.volumes.insert(volume_output_id.to_owned(), volume_level);
-                            settings.volume_level = volume_level.to_string();
-                        }
-                    }
-                }
-            } else {
-                settings.name = String::new();
-                settings.primary_output_id = None;
-                settings.output_ids = Vec::new();
-                settings.action = Action::Edit;
-            }
-
+            settings.name = String::new();
+            settings.primary_output_id = None;
+            settings.output_ids = Vec::new();
+            settings.action = Action::Edit;
             settings.add = None;
         }
     }
@@ -541,9 +539,7 @@ async fn main() {
 
                             nv_settings["extracted_preset"] = serde_json::Value::Null;
 
-                            RoonApi::save_config("settings", nv_settings).unwrap();
-
-                            if let Ok(settings) = serde_json::from_value::<GroupingSettings>(settings) {
+                            if let Ok(mut settings) = serde_json::from_value::<GroupingSettings>(settings) {
                                 let mut status_msg = "Settings saved".to_owned();
 
                                 if settings.selected.is_some() && settings.primary_output_id.is_some() {
@@ -555,10 +551,50 @@ async fn main() {
 
                                         match settings.action {
                                             Action::Activate => {
+                                                // Deactivate any active grouping
+                                                if let Some(extracted_preset) = &settings.extracted_preset {
+                                                    let output_ids = extracted_preset.output_ids
+                                                        .iter()
+                                                        .map(|value| value.as_str())
+                                                        .collect();
+                                                    transport.ungroup_outputs(output_ids).await;
+                                                }
+
+                                                let selected = settings.selected.unwrap();
+
+                                                if let Some(preset) = settings.presets.get(selected) {
+                                                    match preset.volume_type {
+                                                        VolumeType::Untouched => (),
+                                                        _ => {
+                                                            for (output_id, value) in &preset.volumes {
+                                                                transport.change_volume(output_id, "absolute", *value).await;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
                                                 transport.group_outputs(output_ids).await;
                                                 status_msg = format!("Preset \"{}\" activated", settings.name);
                                             }
                                             Action::Deactivate => {
+                                                let selected = settings.selected.unwrap();
+
+                                                if let Some(preset) = settings.presets.get_mut(selected) {
+                                                    if let VolumeType::LastUsed = preset.volume_type {
+                                                        let output_list = output_list.lock().unwrap();
+                                                        let volumes = &mut nv_settings["presets"].get_mut(selected).unwrap()["volumes"];
+
+                                                        for output_id in &output_ids {
+                                                            if let Some(output) = output_list.get(*output_id) {
+                                                                let volume_level = output.volume.value as i32;
+
+                                                                preset.volumes.insert((*output_id).to_string(), volume_level);
+                                                                volumes[*output_id] = volume_level.into();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
                                                 transport.ungroup_outputs(output_ids).await;
                                                 status_msg = format!("Preset \"{}\" deactivated", settings.name);
                                             }
@@ -588,6 +624,8 @@ async fn main() {
 
                                 *saved_settings = settings;
                             }
+
+                            RoonApi::save_config("settings", nv_settings).unwrap();
                         }
                         _ => ()
                     }
