@@ -92,26 +92,23 @@ fn store_preset(settings: &mut GroupingSettings) -> Option<()> {
 
 fn store_volume(settings: &mut GroupingSettings, outputs: &HashMap<String, Output>) -> Option<()> {
     let selected = settings.selected?;
+    let preset = settings.presets.get_mut(selected)?;
 
-    if selected < settings.presets.len() {
-        let preset = settings.presets.get_mut(selected)?;
+    preset.volume_type = settings.volume_type.to_owned();
 
-        preset.volume_type = settings.volume_type.to_owned();
+    if let VolumeType::Preset = settings.volume_type {
+        let volume_output_id = settings.volume_output_id.as_ref()?;
 
-        if let VolumeType::Preset = settings.volume_type {
-            let volume_output_id = settings.volume_output_id.as_ref()?;
+        if let None = preset.volumes.get(volume_output_id) {
+            let volume = outputs.get(volume_output_id)?.volume.as_ref()?;
 
-            if let None = preset.volumes.get(volume_output_id) {
-                let volume = &outputs.get(volume_output_id)?.volume;
+            settings.volume_level = volume.value.to_string();
+        }
 
-                settings.volume_level = volume.value.to_string();
-            }
+        if let Ok(volume_level) = settings.volume_level.parse::<i32>() {
+            preset.volumes.insert(volume_output_id.to_owned(), volume_level);
 
-            if let Ok(volume_level) = settings.volume_level.parse::<i32>() {
-                preset.volumes.insert(volume_output_id.to_owned(), volume_level);
-
-                return Some(())
-            }
+            return Some(())
         }
     }
 
@@ -125,16 +122,19 @@ fn load_preset(settings: &mut GroupingSettings, outputs: &HashMap<String, Output
             settings.primary_output_id = Some(preset.output_ids[0].to_owned());
             settings.output_ids = preset.output_ids.to_owned();
             settings.add = None;
+            settings.volume_type = preset.volume_type.to_owned();
 
-            if let Some(volume_output_id) = &settings.volume_output_id {
-                if let Some(volume_level) = preset.volumes.get(volume_output_id).cloned() {
-                    settings.volume_level = volume_level.to_string();
-                } else {
-                    if let Some(output) = outputs.get(volume_output_id) {
-                        let volume_level = output.volume.value as i32;
-
-                        preset.volumes.insert(volume_output_id.to_owned(), volume_level);
+            if let VolumeType::Preset = settings.volume_type {
+                if let Some(volume_output_id) = &settings.volume_output_id {
+                    if let Some(volume_level) = preset.volumes.get(volume_output_id).cloned() {
                         settings.volume_level = volume_level.to_string();
+                    } else if let Some(output) = outputs.get(volume_output_id) {
+                        if let Some(volume) = output.volume.as_ref() {
+                            let volume_level = volume.value as i32;
+
+                            preset.volumes.insert(volume_output_id.to_owned(), volume_level);
+                            settings.volume_level = volume_level.to_string();
+                        }
                     }
                 }
             }
@@ -144,12 +144,14 @@ fn load_preset(settings: &mut GroupingSettings, outputs: &HashMap<String, Output
             settings.output_ids = preset.output_ids.to_owned();
             settings.action = Action::Edit;
             settings.add = settings.output_ids.get(0).cloned();
+            settings.volume_type = VolumeType::Untouched;
         } else {
             settings.name = String::new();
             settings.primary_output_id = None;
             settings.output_ids = Vec::new();
             settings.action = Action::Edit;
             settings.add = None;
+            settings.volume_type = VolumeType::Untouched;
         }
     }
 }
@@ -301,7 +303,7 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                                 ];
 
                                 edit_group.items.push(Widget::Dropdown(Dropdown {
-                                    title: "Volume Control",
+                                    title: "Volume Levels",
                                     subtitle: None,
                                     values,
                                     setting: "volume_type"
@@ -326,25 +328,26 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                                     }));
 
                                     if let Some(output_id) = &settings.volume_output_id {
-                                        let volume = &outputs.get(output_id).unwrap().volume;
-                                        let mut volume_level = Integer {
-                                            title: "Volume Level",
-                                            subtitle: None,
-                                            min: volume.min.to_string(),
-                                            max: volume.max.to_string(),
-                                            setting: "volume_level",
-                                            error: None
-                                        };
-
-                                        if let Ok(out_of_range) = volume_level.out_of_range(&settings.volume_level) {
-                                            if out_of_range {
-                                                let err_msg = format!("Volume level should be between {} and {}", volume_level.min, volume_level.max);
-
-                                                volume_level.error = Some(err_msg);
+                                        if let Some(volume) = &outputs.get(output_id).unwrap().volume {
+                                            let mut volume_level = Integer {
+                                                title: "Output Volume",
+                                                subtitle: None,
+                                                min: volume.min.to_string(),
+                                                max: volume.max.to_string(),
+                                                setting: "volume_level",
+                                                error: None
+                                            };
+    
+                                            if let Ok(out_of_range) = volume_level.out_of_range(&settings.volume_level) {
+                                                if out_of_range {
+                                                    let err_msg = format!("Volume level should be between {} and {}", volume_level.min, volume_level.max);
+    
+                                                    volume_level.error = Some(err_msg);
+                                                }
                                             }
+    
+                                            edit_group.items.push(Widget::Integer(volume_level));
                                         }
-
-                                        edit_group.items.push(Widget::Integer(volume_level));
                                     }
                                 }
                             }
@@ -534,6 +537,13 @@ async fn main() {
                                 output_list.insert(output_id, output);
                             }
                         }
+                        Parsed::OutputsRemoved(output_ids) => {
+                            let mut output_list = output_list.lock().unwrap();
+
+                            for output_id in output_ids {
+                                output_list.remove(&output_id);
+                            }
+                        }
                         Parsed::SettingsSaved(settings) => {
                             let mut nv_settings = settings.to_owned();
 
@@ -586,10 +596,12 @@ async fn main() {
 
                                                         for output_id in &output_ids {
                                                             if let Some(output) = output_list.get(*output_id) {
-                                                                let volume_level = output.volume.value as i32;
+                                                                if let Some(volume) = output.volume.as_ref() {
+                                                                    let volume_level = volume.value as i32;
 
-                                                                preset.volumes.insert((*output_id).to_string(), volume_level);
-                                                                volumes[*output_id] = volume_level.into();
+                                                                    preset.volumes.insert((*output_id).to_string(), volume_level);
+                                                                    volumes[*output_id] = volume_level.into();
+                                                                }
                                                             }
                                                         }
                                                     }

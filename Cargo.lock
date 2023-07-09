@@ -338,7 +338,7 @@ dependencies = [
 [[package]]
 name = "rust-roon-api"
 version = "0.0.1"
-source = "git+https://github.com/TheAppgineer/rust-roon-api.git?rev=2b69115#2b691156ab5ee98c89040e6ac8df088bf5c1d9cd"
+source = "git+https://github.com/TheAppgineer/rust-roon-api.git?rev=86ada04#86ada04eed95aaa7ff5b8fe77a2a5350fde679c0"
 dependencies = [
  "futures-util",
  "if-addrs",
