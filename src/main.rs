@@ -254,40 +254,40 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                     collapsable: true,
                     items: vec![name]
                 });
-    
+
                 if settings.name.len() > 0 {
                     if let Widget::Group(edit_group) = &mut edit_group {
                         let mut values = vec![HashMap::from(
                             [ ("title", "(select output)".into()), ("value", Value::Null) ]
                         )];
-    
+
                         for (output_id, output) in outputs {
                             values.push(HashMap::from(
                                 [ ("title", output.display_name.to_owned().into()), ("value", output_id.to_owned().into()) ]
                             ));
                         }
-    
+
                         let output = Widget::Dropdown(Dropdown {
                             title: "Primary Output",
                             subtitle: None,
                             values,
                             setting: "primary_output_id"
                         });
-    
+
                         edit_group.items.push(output);
-    
+
                         if let Some(primary_output_id) = &settings.primary_output_id {
                             if let Some(output) = outputs.get(primary_output_id) {
                                 let mut values = vec![HashMap::from([ ("title", "(select output)".into()), ("value", Value::Null) ])];
-    
+
                                 for output_id in &output.can_group_with_output_ids {
                                     if *output_id != *primary_output_id {
                                         let name = outputs.get(output_id).unwrap().display_name.to_owned();
-    
+
                                         values.push(HashMap::from([ ("title", name.into()), ("value", output_id.to_owned().into()) ]));
                                     }
                                 }
-    
+
                                 edit_group.items.push(Widget::Dropdown(Dropdown {
                                     title: "Group With",
                                     subtitle: None,
@@ -315,9 +315,11 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                                     ];
 
                                     for output_id in &settings.output_ids {
-                                        let name = outputs.get(output_id).unwrap().display_name.to_owned();
+                                        if let Some(output) = outputs.get(output_id) {
+                                            let name = output.display_name.to_owned();
 
-                                        values.push(HashMap::from([ ("title", name.into()), ("value", output_id.to_owned().into()) ]));
+                                            values.push(HashMap::from([ ("title", name.into()), ("value", output_id.to_owned().into()) ]));
+                                        }
                                     }
 
                                     edit_group.items.push(Widget::Dropdown(Dropdown {
@@ -332,20 +334,20 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                                             let mut volume_level = Integer {
                                                 title: "Output Volume",
                                                 subtitle: None,
-                                                min: volume.min.to_string(),
-                                                max: volume.max.to_string(),
+                                                min: volume.hard_limit_min.to_string(),
+                                                max: volume.hard_limit_max.to_string(),
                                                 setting: "volume_level",
                                                 error: None
                                             };
-    
+
                                             if let Ok(out_of_range) = volume_level.out_of_range(&settings.volume_level) {
                                                 if out_of_range {
                                                     let err_msg = format!("Volume level should be between {} and {}", volume_level.min, volume_level.max);
-    
+
                                                     volume_level.error = Some(err_msg);
                                                 }
                                             }
-    
+
                                             edit_group.items.push(Widget::Integer(volume_level));
                                         }
                                     }
@@ -354,7 +356,7 @@ fn make_layout(settings: GroupingSettings, outputs: &HashMap<String, Output>) ->
                         }
                     }
                 }
-    
+
                 widgets.push(edit_group);
             }
             _ => ()
@@ -554,9 +556,15 @@ async fn main() {
 
                                 if settings.selected.is_some() && settings.primary_output_id.is_some() {
                                     if let Some(transport) = transport.as_ref() {
-                                        let output_ids = settings.output_ids
+                                        let output_ids: Vec<&str> = settings.output_ids
                                             .iter()
-                                            .map(|value| value.as_str())
+                                            .filter_map(|output_id| {
+                                                if output_list.lock().unwrap().contains_key(output_id) {
+                                                    Some(output_id.as_str())
+                                                } else {
+                                                    None
+                                                }
+                                            })
                                             .collect();
 
                                         match settings.action {
@@ -565,7 +573,7 @@ async fn main() {
                                                 if let Some(extracted_preset) = &settings.extracted_preset {
                                                     let output_ids = extracted_preset.output_ids
                                                         .iter()
-                                                        .map(|value| value.as_str())
+                                                        .map(|output_id| output_id.as_str())
                                                         .collect();
                                                     transport.ungroup_outputs(output_ids).await;
                                                 }
@@ -577,7 +585,9 @@ async fn main() {
                                                         VolumeType::Untouched => (),
                                                         _ => {
                                                             for (output_id, value) in &preset.volumes {
-                                                                transport.change_volume(output_id, "absolute", *value).await;
+                                                                if output_ids.contains(&output_id.as_str()) {
+                                                                    transport.change_volume(output_id, "absolute", *value).await;
+                                                                }
                                                             }
                                                         }
                                                     }
